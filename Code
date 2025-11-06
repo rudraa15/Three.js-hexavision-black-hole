@@ -1,0 +1,391 @@
+
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>three.js + Black Hole + HexaVision Pass</title>
+  <style>
+    body {
+      margin: 0;
+      overflow: hidden;
+      background: #000; /* Black background for space */
+      user-select: none;
+      -webkit-user-select: none;
+      -moz-user-select: none;
+      -ms-user-select: none;
+    }
+    canvas {
+      display: block;
+      position: fixed;
+      inset: 0;
+    }
+    /* Style for the overlay text */
+    .note {
+      position: absolute;
+      left: 12px;
+      top: 12px;
+      color: #ddd;
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
+      font-size: 13px;
+      background: rgba(0, 0, 0, 0.5);
+      padding: 8px 10px;
+      border-radius: 6px;
+      backdrop-filter: blur(4px);
+      z-index: 10;
+    }
+    
+    
+  </style>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/dat-gui/0.7.9/dat.gui.min.js"></script>
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.162.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.162.0/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+<body>
+  <div id="app">
+    <div class="note">three.js + Black Hole + HexaVision Pass</div>
+    
+  </div>
+
+  <script type="module">
+    import * as THREE from 'three';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+    import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+    import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+    import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+    import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
+    import { FXAAShader } from 'three/addons/shaders/FXAAShader.js';
+    import { AfterimagePass } from 'three/addons/postprocessing/AfterimagePass.js';
+
+    // --- SETUP ---
+    const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance', alpha: true });
+    const DPR = Math.min(window.devicePixelRatio || 1, 2);
+    renderer.setPixelRatio(DPR);
+    renderer.setSize(innerWidth, innerHeight);
+    renderer.setClearColor(0x000000, 1);
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.0;
+    document.body.appendChild(renderer.domElement);
+
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.1, 5000);
+    camera.position.set(0, 12, 140);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.06;
+    controls.minDistance = 40;
+    controls.maxDistance = 800;
+
+    // Black Hole Parameters
+    const bhRadius = 9;
+
+    // --- STAR FIELD (from black hole example) ---
+    const starFieldCount = 9000;
+    const starPos = new Float32Array(starFieldCount * 3);
+    const starColor = new Float32Array(starFieldCount * 3);
+    for(let i=0;i<starFieldCount;i++){
+      const r = THREE.MathUtils.randFloat(400, 2000);
+      const theta = Math.random() * Math.PI * 2;
+      const phi = Math.acos(THREE.MathUtils.randFloatSpread(2));
+      const x = r * Math.sin(phi) * Math.cos(theta);
+      const y = r * Math.cos(phi);
+      const z = r * Math.sin(phi) * Math.sin(theta);
+      starPos[i*3]=x; starPos[i*3+1]=y; starPos[i*3+2]=z;
+      const hue = Math.random() * 0.15 + 0.55;
+      const col = new THREE.Color().setHSL(hue, 0.9, 0.6);
+      starColor[i*3]=col.r; starColor[i*3+1]=col.g; starColor[i*3+2]=col.b;
+    }
+    const starsGeo = new THREE.BufferGeometry();
+    starsGeo.setAttribute('position', new THREE.BufferAttribute(starPos,3));
+    starsGeo.setAttribute('color', new THREE.BufferAttribute(starColor,3));
+    const starsMat = new THREE.PointsMaterial({ size: 1.4, vertexColors: true, sizeAttenuation: true, transparent:true, opacity:0.95, depthWrite:false });
+    const starPoints = new THREE.Points(starsGeo, starsMat);
+    scene.add(starPoints);
+
+    // --- EVENT HORIZON (Black Sphere) ---
+    const eventGeo = new THREE.SphereGeometry(bhRadius, 64, 64);
+    const eventMat = new THREE.MeshBasicMaterial({ color: 0x000000 });
+    const eventHorizon = new THREE.Mesh(eventGeo, eventMat);
+    scene.add(eventHorizon);
+
+    // --- ACCRETION DISK ---
+    const diskSegments = 256;
+    const diskGeo = new THREE.RingGeometry(bhRadius*1.2, bhRadius*6.5, diskSegments, 1);
+    const diskMat = new THREE.ShaderMaterial({
+      uniforms: {
+        time: { value: 0 },
+        inner: { value: bhRadius*1.2 },
+        outer: { value: bhRadius*6.5 },
+        colorA: { value: new THREE.Color(0xffbb66) },
+        colorB: { value: new THREE.Color(0x66bbff) }
+      },
+      vertexShader: `varying vec2 vUv; varying vec3 vPos; void main(){ vUv = uv; vPos = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }`,
+      fragmentShader: `precision highp float; varying vec2 vUv; varying vec3 vPos; uniform float time; uniform float inner; uniform float outer; uniform vec3 colorA; uniform vec3 colorB; float rand(vec2 co){return fract(sin(dot(co.xy ,vec2(12.9898,78.233))) * 43758.5453);} void main(){ vec2 p = vPos.xy; float r = length(p); float t = time*1.8; float speed = smoothstep(inner, outer, r); float glow = pow(1.0 - smoothstep(inner, outer, r), 1.8); float angle = atan(p.y,p.x); float doppler = 0.5 + 0.5 * sin(angle*10.0 - t*8.0) * 0.6; float noise = rand(floor(p*10.0 + t)); vec3 col = mix(colorA, colorB, clamp((r- inner)/(outer-inner) + doppler*0.2 + noise*0.02,0.0,1.0)); col *= 0.6 + 1.6*glow; gl_FragColor = vec4(col, clamp(glow*1.2,0.0,1.0)); }`,
+      transparent: true, blending: THREE.AdditiveBlending, side: THREE.DoubleSide, depthWrite:false
+    });
+    const disk = new THREE.Mesh(diskGeo, diskMat);
+    disk.rotation.x = Math.PI * 0.48;
+    scene.add(disk);
+
+    // --- GRAVITATIONAL LENS ---
+    // Note: The lens needs to be rendered using the pre-bloom scene texture for the effect to work correctly
+    const lensGeo = new THREE.PlaneGeometry(200,200,1,1);
+    const lensMat = new THREE.ShaderMaterial({
+      uniforms:{ tScene: { value: null }, center: { value: new THREE.Vector2(0.5,0.5) }, strength: { value: 0.65 } },
+      vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }`,
+      fragmentShader: `precision highp float; varying vec2 vUv; uniform sampler2D tScene; uniform vec2 center; uniform float strength; vec2 warp(vec2 uv, vec2 c, float s){ vec2 d = uv - c; float r = length(d); float k = 1.0 / (1.0 + s * r * r); return c + d * k; } void main(){ vec2 uv = vUv; vec2 w = warp(uv, center, strength); gl_FragColor = texture2D(tScene, w); }`,
+      transparent: true, depthWrite:false
+    });
+    const lens = new THREE.Mesh(lensGeo, lensMat);
+    lens.position.set(0,0,0.1); // Keep the lens in the scene, its texture is set in the animate loop
+
+    // --- ACCRETION PARTICLES ---
+    const accCount = 2200;
+    const accPos = new Float32Array(accCount*3);
+    const accVel = new Float32Array(accCount*3);
+    const accColor = new Float32Array(accCount*3);
+    for(let i=0;i<accCount;i++){
+      const a = Math.random()*Math.PI*2;
+      const rad = THREE.MathUtils.randFloat(bhRadius*1.6, bhRadius*12);
+      const x = Math.cos(a)*rad;
+      const y = (Math.random()-0.5)*6;
+      const z = Math.sin(a)*rad;
+      accPos[i*3]=x; accPos[i*3+1]=y; accPos[i*3+2]=z;
+      const v = new THREE.Vector3(-z, 0, x).normalize().multiplyScalar(THREE.MathUtils.randFloat(0.6,1.8));
+      accVel[i*3]=v.x; accVel[i*3+1]=v.y; accVel[i*3+2]=v.z;
+      const c = new THREE.Color().setHSL(THREE.MathUtils.randFloat(0.05,0.15), 0.9, THREE.MathUtils.randFloat(0.45,0.8));
+      accColor[i*3]=c.r; accColor[i*3+1]=c.g; accColor[i*3+2]=c.b;
+    }
+    const accGeo = new THREE.BufferGeometry();
+    accGeo.setAttribute('position', new THREE.BufferAttribute(accPos,3));
+    accGeo.setAttribute('color', new THREE.BufferAttribute(accColor,3));
+    accGeo.setAttribute('velocity', new THREE.BufferAttribute(accVel,3));
+    const accMat = new THREE.PointsMaterial({ size: 1.8, vertexColors: true, transparent:true, blending: THREE.AdditiveBlending, depthWrite:false });
+    const accPoints = new THREE.Points(accGeo, accMat);
+    scene.add(accPoints);
+
+    // --- POST-PROCESSING SETUP ---
+    const composer = new EffectComposer(renderer);
+    const renderPass = new RenderPass(scene, camera);
+    composer.addPass(renderPass);
+
+    // Afterimage Pass (from black hole example)
+    const after = new AfterimagePass(0.92);
+    composer.addPass(after);
+
+    // Unreal Bloom Pass (from both examples)
+    const bloomPass = new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 1.4, 0.6, 0.05);
+    composer.addPass(bloomPass);
+
+    // HexaVision Pass (modified from original file's flyShader)
+    const hexaVisionShader = {
+      uniforms: {
+        tDiffuse: { value: null },
+        resolution: { value: new THREE.Vector2(innerWidth * DPR, innerHeight * DPR) },
+        time: { value: 0 },
+        ommatidiaSize: { value: 8.0 },
+      },
+      vertexShader: `
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: `
+        precision highp float;
+        varying vec2 vUv;
+        uniform sampler2D tDiffuse;
+        uniform vec2 resolution;
+        uniform float ommatidiaSize;
+
+        // Grille hexagonale orientée verticalement (pointes en haut/bas)
+        vec2 hexCoord(vec2 uv, float size) {
+          vec2 r = resolution / size;
+          uv *= r;
+
+          // Décalage horizontal sur une ligne sur deux
+          float row = floor(uv.y);
+          float col = floor(uv.x - mod(row, 2.0) * 0.5);
+
+          vec2 hexUV = vec2(col + 0.5 * mod(row, 2.0), row);
+          hexUV /= r;
+
+          return hexUV;
+      }
+
+        // Masque hexagonal orienté verticalement
+        float hexMask(vec2 uv, float size) {
+            vec2 p = uv * resolution / size;
+            p = fract(p) - 0.5;
+
+            // Transformation pour hexagone vertical
+            p.y *= 1.0;
+            p.x *= 0.57735; // sqrt(3)/3
+
+            p = abs(p);
+            float a = max(p.y * 0.866025 + p.x, p.x * 2.0); // 0.866 = cos(30°)
+            return step(a, 0.5);
+        }
+
+        void main() {
+            vec2 hexUV = hexCoord(vUv, ommatidiaSize);
+            vec4 color = texture2D(tDiffuse, hexUV);
+
+            float mask = hexMask(vUv, ommatidiaSize);
+            gl_FragColor = color * mask;
+        }
+
+      `
+    };
+    const hexaVisionPass = new ShaderPass(hexaVisionShader);
+    hexaVisionPass.renderToScreen = true; // Renders the final result to the screen
+    composer.addPass(hexaVisionPass);
+
+    // FXAA Pass (from black hole example, added before HexaVision if you want it)
+    // Removed for simplicity, as HexaVision will override fine detail anyway.
+
+    const rt = new THREE.WebGLRenderTarget(innerWidth, innerHeight); // Render target for the scene before bloom/lens
+
+    // --- RESIZE HANDLER ---
+    window.addEventListener('resize', () => {
+      camera.aspect = innerWidth / innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(innerWidth, innerHeight);
+      composer.setSize(innerWidth, innerHeight);
+      rt.setSize(innerWidth, innerHeight);
+      // Update HexaVision resolution
+      hexaVisionPass.material.uniforms.resolution.value.set(innerWidth * DPR, innerHeight * DPR);
+    });
+
+    // --- DAT.GUI CONTROLS (from original file) ---
+    const gui = new dat.GUI();
+    gui.close();
+
+    const bloomFolder = gui.addFolder('Bloom');
+    bloomFolder.add(bloomPass, 'strength', 0.0, 3.0).name('Strength');
+    bloomFolder.add(bloomPass, 'radius', 0.0, 1.0).name('Radius');
+    bloomFolder.add(bloomPass, 'threshold', 0.0, 1.0).name('Threshold');
+    bloomFolder.open();
+
+    const hexaFolder = gui.addFolder('HexaVision Effect');
+    hexaFolder.add(hexaVisionPass.material.uniforms.ommatidiaSize, 'value', 2.0, 200).step(1).name('Ommatidia Size');
+    hexaFolder.open();
+    
+    const lensFolder = gui.addFolder('Gravitational Lens');
+    lensFolder.add(lensMat.uniforms.strength, 'value', 0.0, 1.0).name('Lens Strength');
+    lensFolder.open();
+    
+    // --- ANIMATION & PHYSICS ---
+    const clock = new THREE.Clock();
+    function animate(){
+      requestAnimationFrame(animate);
+      const t = clock.getElapsedTime();
+      const dt = Math.min(clock.getDelta(), 0.033);
+
+      // Black hole physics & rotation
+      disk.rotation.z -= dt * 1.8;
+      disk.material.uniforms.time.value = t;
+      eventHorizon.rotation.y += dt * 0.08;
+
+      // Accretion Particle Movement (simulated gravity)
+      const posAttr = accGeo.attributes.position;
+      const velAttr = accGeo.attributes.velocity;
+      for(let i=0;i<accCount;i++){
+        const ix = i*3; const iy = ix+1; const iz = ix+2;
+        const px = posAttr.array[ix]; const py = posAttr.array[iy]; const pz = posAttr.array[iz];
+        const vx = velAttr.array[ix]; const vy = velAttr.array[iy]; const vz = velAttr.array[iz];
+        const dx = -px; const dy = -py*0.5; const dz = -pz;
+        const dist = Math.sqrt(dx*dx + dy*dy + dz*dz);
+        const g = 18.0 / Math.max(6.0, dist*dist);
+        const nvx = vx + dx * g * dt;
+        const nvy = vy + dy * g * dt;
+        const nvz = vz + dz * g * dt;
+        let nx = px + nvx * dt; let ny = py + nvy * dt; let nz = pz + nvz * dt;
+        const r = Math.sqrt(nx*nx + nz*nz);
+        // Reset particle if it falls too close to the event horizon
+        if(r < bhRadius * 1.05){
+          nx = THREE.MathUtils.randFloat(bhRadius*8, bhRadius*18) * (Math.random()>0.5?1:-1);
+          ny = (Math.random()-0.5) * 12;
+          nz = THREE.MathUtils.randFloat(bhRadius*8, bhRadius*18) * (Math.random()>0.5?1:-1);
+        }
+        posAttr.array[ix]=nx; posAttr.array[iy]=ny; posAttr.array[iz]=nz;
+        velAttr.array[ix]=nvx; velAttr.array[iy]=nvy; velAttr.array[iz]=nvz;
+      }
+      posAttr.needsUpdate = true; velAttr.needsUpdate = true;
+
+      // Star Field Drift
+      const starPosAttr = starsGeo.attributes.position;
+      for(let i=0;i<starFieldCount;i++){
+        const idx=i*3; const sx=starPosAttr.array[idx]; const sz=starPosAttr.array[idx+2];
+        starPosAttr.array[idx] = sx * (1 - 0.00001) + (Math.random()-0.5) * 0.12;
+        starPosAttr.array[idx+2] = sz * (1 - 0.00001) + (Math.random()-0.5) * 0.12;
+      }
+      starPosAttr.needsUpdate = true;
+
+      // Update uniforms
+      hexaVisionPass.material.uniforms.time.value = t;
+
+      // --- RENDERING FOR GRAVITATIONAL LENS ---
+      // 1. Render the scene to the render target *before* the lens effect is applied.
+      // Temporarily hide the lens mesh so it doesn't render into its own texture.
+      lens.visible = false;
+      renderer.setRenderTarget(rt);
+      renderer.render(scene, camera);
+      renderer.setRenderTarget(null);
+      lens.visible = true; // Show the lens mesh again
+
+      // 2. Apply the captured texture to the lens material.
+      lensMat.uniforms.tScene.value = rt.texture;
+      // Lens center uniform is currently fixed to the screen center (0.5, 0.5)
+
+      controls.update();
+      composer.render();
+    }
+    animate();
+    
+    // --- SCRAMBLE TEXT EFFECT (from original file) ---
+    function scrambleText(selector, options = {}) {
+        const {
+          speed = 40, duration = 1200, characters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*()_+-=[]{}<>?', delayBetween = 20
+        } = options;
+        const element = document.querySelector(selector);
+        if (!element) return;
+        const originalText = element.textContent;
+        const output = Array(originalText.length).fill('');
+        const resolveFrames = Array.from({ length: originalText.length }, (_, i) => Math.floor(Math.random() * (duration / speed)) + i * (delayBetween / speed));
+        element.textContent = '';
+        let frame = 0;
+        const interval = setInterval(() => {
+          for (let i = 0; i < originalText.length; i++) {
+            if (frame >= resolveFrames[i]) {
+              output[i] = originalText[i];
+            } else {
+              output[i] = characters.charAt(Math.floor(Math.random() * characters.length));
+            }
+          }
+          element.textContent = output.join('');
+          frame++;
+          if (frame > Math.max(...resolveFrames)) {
+            clearInterval(interval);
+            element.textContent = originalText;
+          }
+        }, speed);
+      }
+
+      scrambleText('.note', {
+        speed: 30,
+        duration: 1500,
+        delayBetween: 30
+      });
+
+
+  </script>
+</body>
+</html>
